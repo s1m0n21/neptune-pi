@@ -23,7 +23,7 @@ fn bench_column_building(
 ) -> Fr {
     info!("{}: Creating ColumnTreeBuilder", log_prefix);
     let mut builder = ColumnTreeBuilder::<U11, U8>::new(
-        batcher_type,
+        vec![batcher_type],
         leaves,
         max_column_batch_size,
         max_tree_batch_size,
@@ -35,7 +35,7 @@ fn bench_column_building(
     let constant_element = Fr::zero();
     let constant_column = GenericArray::<Fr, U11>::generate(|_| constant_element);
 
-    let max_batch_size = if let Some(batcher) = &builder.column_batcher {
+    let max_batch_size = if let Some(batcher) = &builder.column_batchers[0] {
         batcher.max_batch_size()
     } else {
         leaves
@@ -56,7 +56,7 @@ fn bench_column_building(
         let columns: Vec<GenericArray<Fr, U11>> =
             (0..effective_batch_size).map(|_| constant_column).collect();
 
-        let _ = builder.add_columns(columns.as_slice()).unwrap();
+        let _ = builder.add_columns(0, columns.as_slice()).unwrap();
         total_columns += columns.len();
     }
     println!();
@@ -69,7 +69,7 @@ fn bench_column_building(
         "{}: adding final column batch and building tree",
         log_prefix
     );
-    let (_, res) = builder.add_final_columns(final_columns.as_slice()).unwrap();
+    let (_, res) = builder.add_final_columns(0, final_columns.as_slice()).unwrap();
     info!("{}: end commitment", log_prefix);
     let elapsed = start.elapsed();
     info!("{}: commitment time: {:?}", log_prefix, elapsed);
@@ -79,7 +79,7 @@ fn bench_column_building(
 
     let computed_root = res[res.len() - 1];
 
-    let expected_root = builder.compute_uniform_tree_root(final_columns[0]).unwrap();
+    let expected_root = builder.compute_uniform_tree_root(final_columns[0].clone()).unwrap();
     let expected_size = builder.tree_size();
 
     assert_eq!(

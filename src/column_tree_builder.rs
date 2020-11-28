@@ -64,7 +64,7 @@ where
             }),
         };
 
-        self.fill_index += column_count;
+        self.fill_index[index] += column_count;
 
         Ok(())
     }
@@ -77,7 +77,7 @@ where
         self.add_columns(index, columns)?;
 
         let (base, tree) = self.tree_builder.add_final_leaves(&self.data[index])?;
-        self.reset();
+        self.reset(index);
 
         Ok((base, tree))
     }
@@ -120,7 +120,7 @@ where
         let typ = &t;
 
         for bt in typ.iter() {
-            let column_batcher = match &t {
+            let column_batcher = match bt {
                 Some(t) => Some(Batcher::<ColumnArity>::new(t, max_column_batch_size)?),
                 None => None,
             };
