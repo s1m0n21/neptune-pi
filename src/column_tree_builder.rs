@@ -8,19 +8,21 @@ use ff::Field;
 use generic_array::GenericArray;
 #[cfg(all(feature = "gpu", not(target_os = "macos")))]
 use rust_gpu_tools::opencl::GPUSelector;
+use rust_gpu_tools::opencl::KernelArgument;
 
 pub trait ColumnTreeBuilderTrait<ColumnArity, TreeArity>
 where
     ColumnArity: Arity<Fr>,
     TreeArity: Arity<Fr>,
 {
-    fn add_columns(&mut self, columns: &[GenericArray<Fr, ColumnArity>]) -> Result<(), Error>;
+    fn add_columns(&mut self, index: usize, columns: &[GenericArray<Fr, ColumnArity>]) -> Result<(), Error>;
     fn add_final_columns(
         &mut self,
+        index: usize,
         columns: &[GenericArray<Fr, ColumnArity>],
     ) -> Result<(Vec<Fr>, Vec<Fr>), Error>;
 
-    fn reset(&mut self);
+    fn reset(&mut self, index: usize);
 }
 
 pub struct ColumnTreeBuilder<ColumnArity, TreeArity>
@@ -29,11 +31,11 @@ where
     TreeArity: Arity<Fr>,
 {
     pub leaf_count: usize,
-    data: Vec<Fr>,
+    data: Vec<Vec<Fr>>,
     /// Index of the first unfilled datum.
-    fill_index: usize,
+    fill_index: Vec<usize>,
     column_constants: PoseidonConstants<Bls12, ColumnArity>,
-    pub column_batcher: Option<Batcher<ColumnArity>>,
+    pub column_batchers: Vec<Option<Batcher<ColumnArity>>>,
     tree_builder: TreeBuilder<TreeArity>,
 }
 
@@ -43,8 +45,8 @@ where
     ColumnArity: Arity<Fr>,
     TreeArity: Arity<Fr>,
 {
-    fn add_columns(&mut self, columns: &[GenericArray<Fr, ColumnArity>]) -> Result<(), Error> {
-        let start = self.fill_index;
+    fn add_columns(&mut self, index: usize, columns: &[GenericArray<Fr, ColumnArity>]) -> Result<(), Error> {
+        let start = self.fill_index[index];
         let column_count = columns.len();
         let end = start + column_count;
 
@@ -52,12 +54,12 @@ where
             return Err(Error::Other("too many columns".to_string()));
         }
 
-        match self.column_batcher {
+        match self.column_batchers[index] {
             Some(ref mut batcher) => {
-                batcher.hash_into_slice(&mut self.data[start..start + column_count], columns)?;
+                batcher.hash_into_slice(&mut self.data[index][start..start + column_count], columns)?;
             }
             None => columns.iter().enumerate().for_each(|(i, column)| {
-                self.data[start + i] =
+                self.data[index][start + i] =
                     Poseidon::new_with_preimage(&column, &self.column_constants).hash();
             }),
         };
@@ -69,19 +71,20 @@ where
 
     fn add_final_columns(
         &mut self,
+        index: usize,
         columns: &[GenericArray<Fr, ColumnArity>],
     ) -> Result<(Vec<Fr>, Vec<Fr>), Error> {
-        self.add_columns(columns)?;
+        self.add_columns(index, columns)?;
 
-        let (base, tree) = self.tree_builder.add_final_leaves(&self.data)?;
+        let (base, tree) = self.tree_builder.add_final_leaves(&self.data[index])?;
         self.reset();
 
         Ok((base, tree))
     }
 
-    fn reset(&mut self) {
-        self.fill_index = 0;
-        self.data.iter_mut().for_each(|place| *place = Fr::zero());
+    fn reset(&mut self, index: usize) {
+        self.fill_index[index] = 0;
+        self.data[index].iter_mut().for_each(|place| *place = Fr::zero());
     }
 }
 fn as_generic_arrays<'a, A: Arity<Fr>>(vec: &'a [Fr]) -> &'a [GenericArray<Fr, A>] {
@@ -108,18 +111,24 @@ where
     TreeArity: Arity<Fr>,
 {
     pub fn new(
-        t: Option<BatcherType>,
+        t: Vec<Option<BatcherType>>,
         leaf_count: usize,
         max_column_batch_size: usize,
         max_tree_batch_size: usize,
     ) -> Result<Self, Error> {
-        let column_batcher = match &t {
-            Some(t) => Some(Batcher::<ColumnArity>::new(t, max_column_batch_size)?),
-            None => None,
+        let mut column_batchers = Vec::with_capacity(t.len());
+        let typ = &t;
+
+        for bt in typ.iter() {
+            let column_batcher = match &t {
+                Some(t) => Some(Batcher::<ColumnArity>::new(t, max_column_batch_size)?),
+                None => None,
+            };
+            column_batchers.push(column_batcher);
         };
 
         let tree_builder = match {
-            match &column_batcher {
+            match &column_batchers[0] {
                 Some(b) => b.futhark_context(),
                 None => None,
             }
@@ -130,15 +139,15 @@ where
                 max_tree_batch_size,
                 0,
             )?,
-            None => TreeBuilder::<TreeArity>::new(t, leaf_count, max_tree_batch_size, 0)?,
+            None => TreeBuilder::<TreeArity>::new(typ[0].clone(), leaf_count, max_tree_batch_size, 0)?,
         };
 
         let builder = Self {
             leaf_count,
-            data: vec![Fr::zero(); leaf_count],
-            fill_index: 0,
+            data: vec![vec![Fr::zero(); leaf_count]; column_batchers.len()],
+            fill_index: Vec::<usize>::with_capacity(column_batchers.len()),
             column_constants: PoseidonConstants::<Bls12, ColumnArity>::new(),
-            column_batcher,
+            column_batchers,
             tree_builder,
         };
 
@@ -193,7 +202,7 @@ mod tests {
         let batch_size = leaves / num_batches;
 
         let mut builder = ColumnTreeBuilder::<U11, U8>::new(
-            batcher_type,
+            vec![batcher_type],
             leaves,
             max_column_batch_size,
             max_tree_batch_size,
@@ -217,7 +226,7 @@ mod tests {
             let columns: Vec<GenericArray<Fr, U11>> =
                 (0..effective_batch_size).map(|_| constant_column).collect();
 
-            let _ = builder.add_columns(columns.as_slice()).unwrap();
+            let _ = builder.add_columns(0, columns.as_slice()).unwrap();
             total_columns += columns.len();
         }
 
@@ -225,7 +234,7 @@ mod tests {
             .map(|_| GenericArray::<Fr, U11>::generate(|_| constant_element))
             .collect();
 
-        let (base, res) = builder.add_final_columns(final_columns.as_slice()).unwrap();
+        let (base, res) = builder.add_final_columns(0, final_columns.as_slice()).unwrap();
 
         let column_hash =
             Poseidon::new_with_preimage(&constant_column, &builder.column_constants).hash();
@@ -233,7 +242,7 @@ mod tests {
 
         let computed_root = res[res.len() - 1];
 
-        let expected_root = builder.compute_uniform_tree_root(final_columns[0]).unwrap();
+        let expected_root = builder.compute_uniform_tree_root(final_columns[0].clone()).unwrap();
         let expected_size = builder.tree_builder.tree_size(0);
 
         assert_eq!(leaves, base.len());
