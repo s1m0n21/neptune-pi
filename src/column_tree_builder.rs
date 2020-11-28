@@ -145,7 +145,7 @@ where
         let builder = Self {
             leaf_count,
             data: vec![vec![Fr::zero(); leaf_count]; column_batchers.len()],
-            fill_index: Vec::<usize>::with_capacity(column_batchers.len()),
+            fill_index: vec![0 as usize; column_batchers.len()],
             column_constants: PoseidonConstants::<Bls12, ColumnArity>::new(),
             column_batchers,
             tree_builder,
